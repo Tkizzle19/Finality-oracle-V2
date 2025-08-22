@@ -1,8 +1,6 @@
-fix: Update Vercel configuration for React build
+fix: Simplify Vercel configuration for React deployment
 
-- Fixed vercel.json to use @vercel/static-build
-- Added vercel-build script to package.json
-- Configured proper routing for SPA
-- Set distDir to 'build' for React output
-
-Should resolve 'no output named public' build error
+- Simplified vercel.json to minimal rewrites configuration
+- Added .vercelignore to exclude unnecessary files
+- Verified local build works correctly (157KB gzipped)
+- Should resolve public/build directory detection issues
