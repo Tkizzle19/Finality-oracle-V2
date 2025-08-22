@@ -1,0 +1,242 @@
+{
+  "manifestVersion": "3.2",
+  "proxies": [
+    {
+      "address": "0xfC970196694b397308Cf3f89639E141BD344f281",
+      "txHash": "0x68a1aa9373b25743c32ae112854a31c3c808c82c0cff8e15d6b90c36b33cf719",
+      "kind": "uups"
+    }
+  ],
+  "impls": {
+    "15d133d864fe828fb2c48bade727ff067ea6f53899c609fbbed1771702a6c9f0": {
+      "address": "0x1dbC2B4Ed4330ef6e01b0c7410F12f0dBFE59E14",
+      "txHash": "0xb2351a560ef64c7295836c0a78ede066f9a4fa8a809d5c95292b68ea2ec312f4",
+      "layout": {
+        "solcVersion": "0.8.24",
+        "storage": [
+          {
+            "label": "oracles",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_mapping(t_address,t_struct(Oracle)6892_storage)",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:31"
+          },
+          {
+            "label": "finalityProofs",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_mapping(t_bytes32,t_struct(FinalityProof)6883_storage)",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:32"
+          },
+          {
+            "label": "verifiedTransactions",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_mapping(t_bytes32,t_bool)",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:33"
+          },
+          {
+            "label": "activeOracles",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_array(t_address)dyn_storage",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:35"
+          },
+          {
+            "label": "requiredSignatures",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_uint256",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:36"
+          },
+          {
+            "label": "maxOracles",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_uint256",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:37"
+          },
+          {
+            "label": "minStake",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_uint256",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:38"
+          },
+          {
+            "label": "slashingAmount",
+            "offset": 0,
+            "slot": "7",
+            "type": "t_uint256",
+            "contract": "FinalityVerifierV2",
+            "src": "contracts\\FinalityVerifierV2.sol:39"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_array(t_address)dyn_storage": {
+            "label": "address[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_bytes32)dyn_storage": {
+            "label": "bytes32[]",
+            "numberOfBytes": "32"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_bytes_storage": {
+            "label": "bytes",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_struct(Oracle)6892_storage)": {
+            "label": "mapping(address => struct FinalityVerifierV2.Oracle)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_bool)": {
+            "label": "mapping(bytes32 => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(FinalityProof)6883_storage)": {
+            "label": "mapping(bytes32 => struct FinalityVerifierV2.FinalityProof)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(FinalityProof)6883_storage": {
+            "label": "struct FinalityVerifierV2.FinalityProof",
+            "members": [
+              {
+                "label": "txHash",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "timestamp",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "status",
+                "type": "t_uint8",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "slaTarget",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "chainId",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "confirmations",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "merkleProof",
+                "type": "t_array(t_bytes32)dyn_storage",
+                "offset": 0,
+                "slot": "6"
+              },
+              {
+                "label": "signature",
+                "type": "t_bytes_storage",
+                "offset": 0,
+                "slot": "7"
+              }
+            ],
+            "numberOfBytes": "256"
+          },
+          "t_struct(Oracle)6892_storage": {
+            "label": "struct FinalityVerifierV2.Oracle",
+            "members": [
+              {
+                "label": "oracleAddress",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "isActive",
+                "type": "t_bool",
+                "offset": 20,
+                "slot": "0"
+              },
+              {
+                "label": "stake",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "reputation",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "2"
+              }
+            ],
+            "numberOfBytes": "96"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint8": {
+            "label": "uint8",
+            "numberOfBytes": "1"
+          },
+          "t_uint64": {
+            "label": "uint64"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin\\contracts-upgradeable\\access\\OwnableUpgradeable.sol:24"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin\\contracts-upgradeable\\proxy\\utils\\Initializable.sol:69"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin\\contracts-upgradeable\\proxy\\utils\\Initializable.sol:73"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,419 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
+/**
+ * @title FinalityVerifierV2
+ * @dev Bulletproof finality verification oracle with multi-signature validation
+ * @author Bulletproof Oracle Team
+ */
+contract FinalityVerifierV2 is 
+    Initializable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable 
+{
+    using ECDSA for bytes32;
+    using MessageHashUtils for bytes32;
+
+    // Role definitions
+    bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
+    bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
+    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+
+    // Chain configuration
+    struct ChainConfig {
+        uint256 chainId;
+        uint256 minConfirmations;
+        uint256 maxProofAge;
+        bool isActive;
+    }
+
+    // Finality proof structure
+    struct FinalityProof {
+        uint256 chainId;
+        uint256 blockNumber;
+        bytes32 blockHash;
+        bytes32 stateRoot;
+        uint256 timestamp;
+        bytes[] signatures;
+        address[] signers;
+        bool isFinalized;
+    }
+
+    // Oracle information
+    struct OracleInfo {
+        address oracle;
+        uint256 reputation;
+        uint256 successCount;
+        uint256 totalSubmissions;
+        bool isActive;
+        uint256 lastSubmission;
+    }
+
+    // State variables
+    mapping(uint256 => ChainConfig) public chainConfigs;
+    mapping(uint256 => mapping(uint256 => FinalityProof)) public finalityProofs;
+    mapping(address => OracleInfo) public oracles;
+    mapping(uint256 => uint256) public latestFinalizedBlocks;
+    
+    uint256[] public supportedChains;
+    uint256 public constant MIN_SIGNATURES = 3;
+    uint256 public constant REPUTATION_THRESHOLD = 80; // Out of 100
+    uint256 public totalOracles;
+
+    // Events
+    event FinalityProofSubmitted(
+        uint256 indexed chainId,
+        uint256 indexed blockNumber,
+        bytes32 blockHash,
+        address indexed oracle
+    );
+    
+    event FinalityConfirmed(
+        uint256 indexed chainId,
+        uint256 indexed blockNumber,
+        bytes32 blockHash
+    );
+    
+    event OracleAdded(address indexed oracle, uint256 initialReputation);
+    event OracleRemoved(address indexed oracle);
+    event ChainConfigured(uint256 indexed chainId, uint256 minConfirmations, uint256 maxProofAge);
+
+    // Custom errors
+    error InvalidChainId();
+    error InsufficientSignatures();
+    error InvalidSignature();
+    error ProofTooOld();
+    error OracleNotActive();
+    error UnauthorizedOracle();
+    error InvalidBlockNumber();
+    error ProofAlreadyFinalized();
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
+        address _admin,
+        address _emergencyAdmin,
+        uint256[] memory _chainIds,
+        uint256[] memory _minConfirmations,
+        uint256[] memory _maxProofAges
+    ) public initializer {
+        require(_admin != address(0), "Invalid admin address");
+        require(_emergencyAdmin != address(0), "Invalid emergency admin address");
+        require(_chainIds.length == _minConfirmations.length, "Array length mismatch");
+        require(_chainIds.length == _maxProofAges.length, "Array length mismatch");
+
+        __AccessControl_init();
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        _grantRole(EMERGENCY_ROLE, _emergencyAdmin);
+        _grantRole(UPGRADER_ROLE, _admin);
+
+        // Configure supported chains
+        for (uint256 i = 0; i < _chainIds.length; i++) {
+            _configureChain(_chainIds[i], _minConfirmations[i], _maxProofAges[i]);
+        }
+    }
+
+    /**
+     * @dev Submit finality proof for a specific chain and block
+     */
+    function submitFinalityProof(
+        uint256 _chainId,
+        uint256 _blockNumber,
+        bytes32 _blockHash,
+        bytes32 _stateRoot,
+        bytes[] memory _signatures,
+        address[] memory _signers
+    ) external whenNotPaused nonReentrant {
+        // Validate oracle
+        OracleInfo storage oracle = oracles[msg.sender];
+        if (!oracle.isActive) revert OracleNotActive();
+        if (!hasRole(ORACLE_ROLE, msg.sender)) revert UnauthorizedOracle();
+
+        // Validate chain
+        ChainConfig memory config = chainConfigs[_chainId];
+        if (!config.isActive) revert InvalidChainId();
+
+        // Validate signatures
+        if (_signatures.length < MIN_SIGNATURES) revert InsufficientSignatures();
+        if (_signatures.length != _signers.length) revert InvalidSignature();
+
+        // Check if proof already exists and is finalized
+        FinalityProof storage existingProof = finalityProofs[_chainId][_blockNumber];
+        if (existingProof.isFinalized) revert ProofAlreadyFinalized();
+
+        // Validate block number progression
+        if (_blockNumber <= latestFinalizedBlocks[_chainId]) revert InvalidBlockNumber();
+
+        // Create finality proof
+        FinalityProof memory proof = FinalityProof({
+            chainId: _chainId,
+            blockNumber: _blockNumber,
+            blockHash: _blockHash,
+            stateRoot: _stateRoot,
+            timestamp: block.timestamp,
+            signatures: _signatures,
+            signers: _signers,
+            isFinalized: false
+        });
+
+        // Verify signatures
+        _verifySignatures(proof);
+
+        // Store proof
+        finalityProofs[_chainId][_blockNumber] = proof;
+
+        // Update oracle stats
+        oracle.totalSubmissions++;
+        oracle.lastSubmission = block.timestamp;
+
+        emit FinalityProofSubmitted(_chainId, _blockNumber, _blockHash, msg.sender);
+
+        // Check if proof can be finalized
+        _checkFinalization(_chainId, _blockNumber);
+    }
+
+    /**
+     * @dev Verify finality proof signatures
+     */
+    function _verifySignatures(FinalityProof memory _proof) internal view {
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            _proof.chainId,
+            _proof.blockNumber,
+            _proof.blockHash,
+            _proof.stateRoot,
+            _proof.timestamp
+        ));
+
+        bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
+
+        for (uint256 i = 0; i < _proof.signatures.length; i++) {
+            address recovered = ethSignedMessageHash.recover(_proof.signatures[i]);
+            
+            // Verify signer matches
+            if (recovered != _proof.signers[i]) revert InvalidSignature();
+            
+            // Verify signer is an active oracle with good reputation
+            OracleInfo memory oracleInfo = oracles[_proof.signers[i]];
+            if (!oracleInfo.isActive) revert OracleNotActive();
+            if (!hasRole(ORACLE_ROLE, _proof.signers[i])) revert UnauthorizedOracle();
+        }
+    }
+
+    /**
+     * @dev Check if finality proof can be finalized based on consensus
+     */
+    function _checkFinalization(uint256 _chainId, uint256 _blockNumber) internal {
+        FinalityProof storage proof = finalityProofs[_chainId][_blockNumber];
+        ChainConfig memory config = chainConfigs[_chainId];
+
+        // Check if proof is old enough to be considered final
+        if (block.timestamp - proof.timestamp >= config.maxProofAge) {
+            if (block.timestamp - proof.timestamp > config.maxProofAge * 2) {
+                revert ProofTooOld();
+            }
+        }
+
+        // Check if we have enough high-reputation signatures
+        uint256 validSignatures = 0;
+        uint256 totalReputation = 0;
+
+        for (uint256 i = 0; i < proof.signers.length; i++) {
+            OracleInfo memory oracleInfo = oracles[proof.signers[i]];
+            if (oracleInfo.isActive && oracleInfo.reputation >= REPUTATION_THRESHOLD) {
+                validSignatures++;
+                totalReputation += oracleInfo.reputation;
+            }
+        }
+
+        // Finalize if conditions are met
+        if (validSignatures >= MIN_SIGNATURES && 
+            totalReputation >= (MIN_SIGNATURES * REPUTATION_THRESHOLD)) {
+            
+            proof.isFinalized = true;
+            latestFinalizedBlocks[_chainId] = _blockNumber;
+
+            // Update oracle reputations for successful finalization
+            for (uint256 i = 0; i < proof.signers.length; i++) {
+                OracleInfo storage oracleInfo = oracles[proof.signers[i]];
+                if (oracleInfo.isActive) {
+                    oracleInfo.successCount++;
+                    _updateReputation(proof.signers[i]);
+                }
+            }
+
+            emit FinalityConfirmed(_chainId, _blockNumber, proof.blockHash);
+        }
+    }
+
+    /**
+     * @dev Update oracle reputation based on performance
+     */
+    function _updateReputation(address _oracle) internal {
+        OracleInfo storage oracle = oracles[_oracle];
+        if (oracle.totalSubmissions > 0) {
+            // Calculate success rate and update reputation
+            uint256 successRate = (oracle.successCount * 100) / oracle.totalSubmissions;
+            oracle.reputation = (oracle.reputation + successRate) / 2; // Moving average
+            
+            // Cap reputation at 100
+            if (oracle.reputation > 100) {
+                oracle.reputation = 100;
+            }
+        }
+    }
+
+    /**
+     * @dev Add new oracle with initial reputation
+     */
+    function addOracle(address _oracle, uint256 _initialReputation) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
+        require(_oracle != address(0), "Invalid oracle address");
+        require(_initialReputation <= 100, "Reputation too high");
+        require(!oracles[_oracle].isActive, "Oracle already exists");
+
+        oracles[_oracle] = OracleInfo({
+            oracle: _oracle,
+            reputation: _initialReputation,
+            successCount: 0,
+            totalSubmissions: 0,
+            isActive: true,
+            lastSubmission: 0
+        });
+
+        _grantRole(ORACLE_ROLE, _oracle);
+        totalOracles++;
+
+        emit OracleAdded(_oracle, _initialReputation);
+    }
+
+    /**
+     * @dev Remove oracle
+     */
+    function removeOracle(address _oracle) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
+        require(oracles[_oracle].isActive, "Oracle not active");
+        
+        oracles[_oracle].isActive = false;
+        _revokeRole(ORACLE_ROLE, _oracle);
+        totalOracles--;
+
+        emit OracleRemoved(_oracle);
+    }
+
+    /**
+     * @dev Configure chain parameters
+     */
+    function configureChain(
+        uint256 _chainId,
+        uint256 _minConfirmations,
+        uint256 _maxProofAge
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _configureChain(_chainId, _minConfirmations, _maxProofAge);
+    }
+
+    function _configureChain(
+        uint256 _chainId,
+        uint256 _minConfirmations,
+        uint256 _maxProofAge
+    ) internal {
+        require(_chainId > 0, "Invalid chain ID");
+        require(_minConfirmations > 0, "Invalid confirmations");
+        require(_maxProofAge > 0, "Invalid proof age");
+
+        bool isNewChain = !chainConfigs[_chainId].isActive;
+        
+        chainConfigs[_chainId] = ChainConfig({
+            chainId: _chainId,
+            minConfirmations: _minConfirmations,
+            maxProofAge: _maxProofAge,
+            isActive: true
+        });
+
+        if (isNewChain) {
+            supportedChains.push(_chainId);
+        }
+
+        emit ChainConfigured(_chainId, _minConfirmations, _maxProofAge);
+    }
+
+    /**
+     * @dev Get finality status for a block
+     */
+    function getFinalityStatus(uint256 _chainId, uint256 _blockNumber) 
+        external 
+        view 
+        returns (bool isFinalized, bytes32 blockHash, uint256 timestamp) 
+    {
+        FinalityProof memory proof = finalityProofs[_chainId][_blockNumber];
+        return (proof.isFinalized, proof.blockHash, proof.timestamp);
+    }
+
+    /**
+     * @dev Get oracle information
+     */
+    function getOracleInfo(address _oracle) 
+        external 
+        view 
+        returns (OracleInfo memory) 
+    {
+        return oracles[_oracle];
+    }
+
+    /**
+     * @dev Get supported chains
+     */
+    function getSupportedChains() external view returns (uint256[] memory) {
+        return supportedChains;
+    }
+
+    /**
+     * @dev Emergency pause function
+     */
+    function emergencyPause() external onlyRole(EMERGENCY_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @dev Unpause function
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    /**
+     * @dev UUPS upgrade authorization
+     */
+    function _authorizeUpgrade(address newImplementation) 
+        internal 
+        onlyRole(UPGRADER_ROLE) 
+        override 
+    {}
+
+    /**
+     * @dev Get contract version
+     */
+    function version() external pure returns (string memory) {
+        return "2.0.0";
+    }
+}

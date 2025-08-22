@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
+interface IFinalityVerifier {
+    function getFinalityProof(bytes32 txHash, uint256 chainId) external view returns (
+        bytes32,
+        uint256,
+        uint8,
+        uint256,
+        uint256,
+        uint256,
+        uint256,
+        bytes32,
+        uint256,
+        bool,
+        uint256
+    );
+    function isHealthy() external view returns (bool);
+}
+
+/**
+ * @title OracleAggregator
+ * @dev Aggregates multiple oracle sources for enhanced reliability
+ */
+contract OracleAggregator is 
+    Initializable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable
+{
+    // =============================================================
+    //                           CONSTANTS
+    // =============================================================
+    
+    bytes32 public constant UPDATER_ROLE = keccak256("UPDATER_ROLE");
+    bytes32 public constant ORACLE_MANAGER_ROLE = keccak256("ORACLE_MANAGER_ROLE");
+    
+    uint256 public constant MAX_PRICE_SOURCES = 20;
+    uint256 public constant MAX_DEVIATION = 5000; // 50% in basis points
+    uint256 public constant PRICE_VALIDITY_PERIOD = 1 hours;
+
+    // =============================================================
+    //                            STRUCTS
+    // =============================================================
+    
+    struct PriceData {
+        uint256 price;
+        uint256 timestamp;
+        uint256 confidence;
+        bool isValid;
+    }
+    
+    struct OracleSource {
+        address oracle;
+        uint256 weight;
+        bool isActive;
+        uint256 lastUpdate;
+        uint256 successfulUpdates;
+        uint256 totalUpdates;
+    }
+
+    // =============================================================
+    //                       STATE VARIABLES
+    // =============================================================
+    
+    IFinalityVerifier public finalityVerifier;
+    
+    mapping(string => PriceData) public priceFeeds;
+    mapping(address => OracleSource) public oracleSources;
+    address[] public sourceList;
+    
+    uint256 public minAnswers;
+    uint256 public maxAnswers;
+    uint256 public deviationThreshold;
+    uint256 public aggregationMethod; // 0: median, 1: weighted average
+
+    // =============================================================
+    //                            EVENTS
+    // =============================================================
+    
+    event PriceUpdated(
+        string indexed symbol,
+        uint256 price,
+        uint256 timestamp,
+        uint256 confidence
+    );
+    
+    event OracleSourceAdded(address indexed oracle, uint256 weight);
+    event OracleSourceRemoved(address indexed oracle);
+
+    // =============================================================
+    //                        INITIALIZATION
+    // =============================================================
+    
+    function initialize(
+        address _finalityVerifier,
+        uint256 _minAnswers,
+        uint256 _maxAnswers,
+        uint256 _deviationThreshold
+    ) public initializer {
+        __AccessControl_init();
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+        
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(UPDATER_ROLE, msg.sender);
+        _grantRole(ORACLE_MANAGER_ROLE, msg.sender);
+        
+        finalityVerifier = IFinalityVerifier(_finalityVerifier);
+        minAnswers = _minAnswers;
+        maxAnswers = _maxAnswers;
+        deviationThreshold = _deviationThreshold;
+        aggregationMethod = 0; // Default to median
+    }
+
+    // =============================================================
+    //                      PRICE AGGREGATION
+    // =============================================================
+    
+    function updatePrice(
+        string calldata symbol,
+        uint256 price,
+        uint256 confidence
+    ) 
+        external 
+        onlyRole(UPDATER_ROLE) 
+        whenNotPaused 
+        nonReentrant 
+    {
+        require(price > 0, "Invalid price");
+        require(confidence <= 10000, "Invalid confidence");
+        
+        priceFeeds[symbol] = PriceData({
+            price: price,
+            timestamp: block.timestamp,
+            confidence: confidence,
+            isValid: true
+        });
+        
+        emit PriceUpdated(symbol, price, block.timestamp, confidence);
+    }
+    
+    function getLatestPrice(string calldata symbol) 
+        external 
+        view 
+        returns (uint256 price, uint256 timestamp, uint256 confidence, bool isValid) 
+    {
+        PriceData memory data = priceFeeds[symbol];
+        
+        // Check if price is stale
+        if (block.timestamp - data.timestamp > PRICE_VALIDITY_PERIOD) {
+            return (0, 0, 0, false);
+        }
+        
+        return (data.price, data.timestamp, data.confidence, data.isValid);
+    }
+
+    // =============================================================
+    //                        UPGRADES
+    // =============================================================
+    
+    function _authorizeUpgrade(address newImplementation) 
+        internal 
+        override 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {}
+    
+    function version() public pure returns (string memory) {
+        return "v1.0.0";
+    }
+}

@@ -1,0 +1,507 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
+/**
+ * @title FinalityVerifierV2
+ * @dev Oracle contract that verifies transaction finality across multiple chains
+ * @notice This contract provides bulletproof finality verification with multi-signature validation
+ */
+contract FinalityVerifierV2 is 
+    Initializable, 
+    AccessControlUpgradeable, 
+    PausableUpgradeable, 
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable 
+{
+    using ECDSA for bytes32;
+    using MessageHashUtils for bytes32;
+
+    // =============================================================
+    //                           CONSTANTS
+    // =============================================================
+    
+    bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
+    bytes32 public constant UPDATER_ROLE = keccak256("UPDATER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
+    
+    uint256 public constant MAX_ORACLES = 50;
+    uint256 public constant MIN_CONFIRMATIONS = 1;
+    uint256 public constant MAX_CONFIRMATIONS = 200;
+    uint256 public constant MAX_SLA_TARGET = 24 hours;
+    uint256 public constant SIGNATURE_VALIDITY_PERIOD = 1 hours;
+
+    // =============================================================
+    //                             ENUMS
+    // =============================================================
+    
+    enum FinalityStatus {
+        PENDING,        // Transaction is pending
+        CONFIRMED,      // Transaction is confirmed
+        FINALIZED,      // Transaction is finalized
+        FAILED,         // Transaction failed
+        REVERTED,       // Transaction was reverted
+        STALE           // Data is too old
+    }
+
+    // =============================================================
+    //                            STRUCTS
+    // =============================================================
+    
+    struct FinalityProof {
+        bytes32 txHash;           // Transaction hash
+        uint256 timestamp;        // When finality was determined
+        FinalityStatus status;    // Current finality status
+        uint256 slaTarget;        // SLA target in seconds
+        uint256 chainId;          // Chain where transaction occurred
+        uint256 confirmations;    // Number of confirmations
+        uint256 blockNumber;      // Block number of transaction
+        bytes32 blockHash;        // Block hash containing transaction
+        uint256 gasUsed;          // Gas used by transaction
+        bool isValid;             // Whether proof is valid
+        uint256 expiryTime;       // When this proof expires
+    }
+
+    struct OracleInfo {
+        address oracleAddress;    // Oracle address
+        bool isActive;            // Whether oracle is active
+        uint256 reputation;       // Oracle reputation score (0-1000)
+        uint256 lastUpdate;       // Last update timestamp
+        uint256 totalUpdates;     // Total number of updates
+        uint256 correctUpdates;   // Number of correct updates
+    }
+
+    struct ChainConfig {
+        uint256 chainId;          // Chain identifier
+        uint256 minConfirmations; // Minimum confirmations required
+        uint256 blockTime;        // Average block time in seconds
+        bool isSupported;         // Whether chain is supported
+        uint256 emergencyDelay;   // Emergency delay for this chain
+    }
+
+    // =============================================================
+    //                       STATE VARIABLES
+    // =============================================================
+    
+    // Core configuration
+    uint256 public requiredSignatures;
+    uint256 public maxOracles;
+    uint256 public updateInterval;
+    uint256 public deviationThreshold;
+    uint256 public heartbeatInterval;
+    
+    // Oracle management
+    mapping(address => OracleInfo) public oracles;
+    address[] public oracleList;
+    mapping(address => uint256) public oracleIndex;
+    
+    // Finality proofs
+    mapping(bytes32 => FinalityProof) public finalityProofs;
+    mapping(uint256 => ChainConfig) public chainConfigs;
+    mapping(bytes32 => mapping(address => bool)) public oracleVotes;
+    mapping(bytes32 => uint256) public voteCount;
+    
+    // Security and monitoring
+    mapping(bytes32 => uint256) public nonces;
+    mapping(address => uint256) public lastOracleUpdate;
+    uint256 public totalProofs;
+    uint256 public successfulProofs;
+    uint256 public emergencyMode;
+    
+    // Aggregator reference
+    address public aggregator;
+
+    // =============================================================
+    //                            EVENTS
+    // =============================================================
+    
+    event FinalityProofUpdated(
+        bytes32 indexed txHash,
+        uint256 indexed chainId,
+        FinalityStatus status,
+        uint256 confirmations,
+        address indexed oracle
+    );
+    
+    event OracleAdded(address indexed oracle, uint256 reputation);
+    event OracleRemoved(address indexed oracle);
+    event OracleReputationUpdated(address indexed oracle, uint256 newReputation);
+    
+    event ChainConfigUpdated(
+        uint256 indexed chainId,
+        uint256 minConfirmations,
+        uint256 blockTime,
+        bool isSupported
+    );
+    
+    event EmergencyModeActivated(uint256 timestamp, address indexed activator);
+    event EmergencyModeDeactivated(uint256 timestamp, address indexed deactivator);
+    
+    event ConfigurationUpdated(
+        uint256 requiredSignatures,
+        uint256 maxOracles,
+        uint256 updateInterval,
+        uint256 deviationThreshold
+    );
+
+    // =============================================================
+    //                            ERRORS
+    // =============================================================
+    
+    error InvalidOracle();
+    error OracleAlreadyExists();
+    error InsufficientSignatures();
+    error InvalidChainId();
+    error ProofExpired();
+    error InvalidProof();
+    error TooManyOracles();
+    error InvalidConfiguration();
+    error EmergencyModeActive();
+    error StaleData();
+    error InvalidSignature();
+
+    // =============================================================
+    //                         MODIFIERS
+    // =============================================================
+    
+    modifier onlyActiveOracle() {
+        if (!oracles[msg.sender].isActive) revert InvalidOracle();
+        _;
+    }
+    
+    modifier notInEmergencyMode() {
+        if (emergencyMode > 0) revert EmergencyModeActive();
+        _;
+    }
+    
+    modifier validChain(uint256 chainId) {
+        if (!chainConfigs[chainId].isSupported) revert InvalidChainId();
+        _;
+    }
+
+    // =============================================================
+    //                        INITIALIZATION
+    // =============================================================
+    
+    function initialize(
+        address initialOwner,
+        uint256 _requiredSignatures,
+        uint256 _maxOracles,
+        uint256 _updateInterval,
+        uint256 _deviationThreshold,
+        uint256 _heartbeatInterval
+    ) public initializer {
+        if (initialOwner == address(0)) revert InvalidConfiguration();
+        if (_requiredSignatures == 0 || _requiredSignatures > _maxOracles) revert InvalidConfiguration();
+        if (_maxOracles > MAX_ORACLES) revert InvalidConfiguration();
+        
+        __AccessControl_init();
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+        
+        _grantRole(DEFAULT_ADMIN_ROLE, initialOwner);
+        _grantRole(ORACLE_ROLE, initialOwner);
+        _grantRole(UPDATER_ROLE, initialOwner);
+        _grantRole(PAUSER_ROLE, initialOwner);
+        _grantRole(EMERGENCY_ROLE, initialOwner);
+        
+        requiredSignatures = _requiredSignatures;
+        maxOracles = _maxOracles;
+        updateInterval = _updateInterval;
+        deviationThreshold = _deviationThreshold;
+        heartbeatInterval = _heartbeatInterval;
+        
+        emit ConfigurationUpdated(_requiredSignatures, _maxOracles, _updateInterval, _deviationThreshold);
+    }
+
+    // =============================================================
+    //                      ORACLE MANAGEMENT
+    // =============================================================
+    
+    function addOracle(address oracle, uint256 initialReputation) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+        whenNotPaused 
+    {
+        if (oracle == address(0)) revert InvalidOracle();
+        if (oracles[oracle].oracleAddress != address(0)) revert OracleAlreadyExists();
+        if (oracleList.length >= maxOracles) revert TooManyOracles();
+        if (initialReputation > 1000) revert InvalidConfiguration();
+        
+        oracles[oracle] = OracleInfo({
+            oracleAddress: oracle,
+            isActive: true,
+            reputation: initialReputation,
+            lastUpdate: block.timestamp,
+            totalUpdates: 0,
+            correctUpdates: 0
+        });
+        
+        oracleIndex[oracle] = oracleList.length;
+        oracleList.push(oracle);
+        
+        emit OracleAdded(oracle, initialReputation);
+    }
+    
+    function removeOracle(address oracle) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+        whenNotPaused 
+    {
+        if (!oracles[oracle].isActive) revert InvalidOracle();
+        
+        oracles[oracle].isActive = false;
+        
+        // Remove from array
+        uint256 index = oracleIndex[oracle];
+        uint256 lastIndex = oracleList.length - 1;
+        
+        if (index != lastIndex) {
+            address lastOracle = oracleList[lastIndex];
+            oracleList[index] = lastOracle;
+            oracleIndex[lastOracle] = index;
+        }
+        
+        oracleList.pop();
+        delete oracleIndex[oracle];
+        
+        emit OracleRemoved(oracle);
+    }
+
+    // =============================================================
+    //                    FINALITY VERIFICATION
+    // =============================================================
+    
+    function updateFinalityProof(
+        bytes32 txHash,
+        uint256 chainId,
+        FinalityStatus status,
+        uint256 confirmations,
+        uint256 blockNumber,
+        bytes32 blockHash,
+        uint256 gasUsed,
+        uint256 slaTarget,
+        bytes calldata signature
+    ) 
+        external 
+        onlyActiveOracle 
+        whenNotPaused 
+        nonReentrant 
+        validChain(chainId)
+        notInEmergencyMode
+    {
+        if (slaTarget > MAX_SLA_TARGET) revert InvalidConfiguration();
+        if (confirmations > MAX_CONFIRMATIONS) revert InvalidConfiguration();
+        
+        // Verify signature
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            txHash, chainId, uint8(status), confirmations, 
+            blockNumber, blockHash, gasUsed, slaTarget, block.timestamp
+        ));
+        
+        address signer = messageHash.toEthSignedMessageHash().recover(signature);
+        if (signer != msg.sender) revert InvalidSignature();
+        
+        // Check if oracle hasn't updated too recently
+        if (block.timestamp - lastOracleUpdate[msg.sender] < updateInterval) {
+            revert StaleData();
+        }
+        
+        bytes32 proofKey = keccak256(abi.encodePacked(txHash, chainId));
+        
+        // Record oracle vote
+        if (!oracleVotes[proofKey][msg.sender]) {
+            oracleVotes[proofKey][msg.sender] = true;
+            voteCount[proofKey]++;
+        }
+        
+        // Update or create finality proof
+        FinalityProof storage proof = finalityProofs[proofKey];
+        
+        if (proof.txHash == bytes32(0)) {
+            // New proof
+            proof.txHash = txHash;
+            proof.chainId = chainId;
+            proof.timestamp = block.timestamp;
+            proof.expiryTime = block.timestamp + SIGNATURE_VALIDITY_PERIOD;
+            totalProofs++;
+        }
+        
+        // Update proof with latest data if oracle vote threshold is met
+        if (voteCount[proofKey] >= requiredSignatures) {
+            proof.status = status;
+            proof.confirmations = confirmations;
+            proof.blockNumber = blockNumber;
+            proof.blockHash = blockHash;
+            proof.gasUsed = gasUsed;
+            proof.slaTarget = slaTarget;
+            proof.isValid = true;
+            proof.timestamp = block.timestamp;
+            
+            if (status == FinalityStatus.FINALIZED) {
+                successfulProofs++;
+            }
+        }
+        
+        // Update oracle stats
+        oracles[msg.sender].lastUpdate = block.timestamp;
+        oracles[msg.sender].totalUpdates++;
+        lastOracleUpdate[msg.sender] = block.timestamp;
+        
+        emit FinalityProofUpdated(txHash, chainId, status, confirmations, msg.sender);
+    }
+    
+    function getFinalityProof(bytes32 txHash, uint256 chainId) 
+        external 
+        view 
+        returns (FinalityProof memory) 
+    {
+        bytes32 proofKey = keccak256(abi.encodePacked(txHash, chainId));
+        FinalityProof memory proof = finalityProofs[proofKey];
+        
+        // Check if proof is expired
+        if (block.timestamp > proof.expiryTime && proof.expiryTime != 0) {
+            proof.status = FinalityStatus.STALE;
+            proof.isValid = false;
+        }
+        
+        return proof;
+    }
+
+    // =============================================================
+    //                    CHAIN CONFIGURATION
+    // =============================================================
+    
+    function addChainConfig(
+        uint256 chainId,
+        uint256 minConfirmations,
+        uint256 blockTime,
+        uint256 emergencyDelay
+    ) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
+        if (chainId == 0) revert InvalidChainId();
+        if (minConfirmations < MIN_CONFIRMATIONS || minConfirmations > MAX_CONFIRMATIONS) {
+            revert InvalidConfiguration();
+        }
+        
+        chainConfigs[chainId] = ChainConfig({
+            chainId: chainId,
+            minConfirmations: minConfirmations,
+            blockTime: blockTime,
+            isSupported: true,
+            emergencyDelay: emergencyDelay
+        });
+        
+        emit ChainConfigUpdated(chainId, minConfirmations, blockTime, true);
+    }
+
+    // =============================================================
+    //                    EMERGENCY FUNCTIONS
+    // =============================================================
+    
+    function activateEmergencyMode() external onlyRole(EMERGENCY_ROLE) {
+        emergencyMode = block.timestamp;
+        _pause();
+        emit EmergencyModeActivated(block.timestamp, msg.sender);
+    }
+    
+    function deactivateEmergencyMode() external onlyRole(EMERGENCY_ROLE) {
+        emergencyMode = 0;
+        _unpause();
+        emit EmergencyModeDeactivated(block.timestamp, msg.sender);
+    }
+
+    // =============================================================
+    //                      VIEW FUNCTIONS
+    // =============================================================
+    
+    function isHealthy() external view returns (bool) {
+        if (emergencyMode > 0) return false;
+        if (paused()) return false;
+        
+        uint256 activeOracles = 0;
+        for (uint256 i = 0; i < oracleList.length; i++) {
+            if (oracles[oracleList[i]].isActive) {
+                activeOracles++;
+            }
+        }
+        
+        return activeOracles >= requiredSignatures;
+    }
+    
+    function getSuccessRate() external view returns (uint256) {
+        if (totalProofs == 0) return 0;
+        return (successfulProofs * 10000) / totalProofs; // Return as basis points
+    }
+    
+    function getActiveOracleCount() external view returns (uint256) {
+        uint256 count = 0;
+        for (uint256 i = 0; i < oracleList.length; i++) {
+            if (oracles[oracleList[i]].isActive) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // =============================================================
+    //                    CONFIGURATION
+    // =============================================================
+    
+    function updateConfiguration(
+        uint256 _requiredSignatures,
+        uint256 _maxOracles,
+        uint256 _updateInterval,
+        uint256 _deviationThreshold
+    ) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
+        if (_requiredSignatures == 0 || _requiredSignatures > _maxOracles) revert InvalidConfiguration();
+        if (_maxOracles > MAX_ORACLES) revert InvalidConfiguration();
+        
+        requiredSignatures = _requiredSignatures;
+        maxOracles = _maxOracles;
+        updateInterval = _updateInterval;
+        deviationThreshold = _deviationThreshold;
+        
+        emit ConfigurationUpdated(_requiredSignatures, _maxOracles, _updateInterval, _deviationThreshold);
+    }
+    
+    function setAggregator(address _aggregator) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        aggregator = _aggregator;
+    }
+
+    // =============================================================
+    //                        UPGRADES
+    // =============================================================
+    
+    function _authorizeUpgrade(address newImplementation) 
+        internal 
+        override 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {}
+    
+    function version() public pure returns (string memory) {
+        return "v2.1.0";
+    }
+
+    // =============================================================
+    //                      EMERGENCY RECOVERY
+    // =============================================================
+    
+    function emergencyWithdraw() external onlyRole(EMERGENCY_ROLE) {
+        payable(msg.sender).transfer(address(this).balance);
+    }
+}
